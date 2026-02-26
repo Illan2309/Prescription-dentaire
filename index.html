@@ -415,8 +415,25 @@
         🖼️ Choisir depuis la galerie
         <input type="file" id="photo-input-gallery" accept="image/*" style="display:none;" onchange="scanPrescription(this)">
       </label>
+      <label class="btn" style="background:#2d7a4f; color:white; cursor:pointer; display:inline-block;">
+        📚 Scanner plusieurs fiches
+        <input type="file" id="photo-input-multi" accept="image/*" multiple style="display:none;" onchange="scanMultiple(this)">
+      </label>
       <span id="scan-status" style="font-size:0.82rem; color:var(--muted);"></span>
     </div>
+
+    <!-- Barre de progression multi-scan -->
+    <div id="multi-progress" style="display:none; margin-top:16px; background:#f0fdf4; border:1px solid #86efac; border-radius:10px; padding:14px;">
+      <div style="font-size:0.85rem; font-weight:600; color:#166534; margin-bottom:10px;">
+        📚 Scan en cours : <span id="multi-current">0</span> / <span id="multi-total">0</span> fiches
+      </div>
+      <div style="background:#dcfce7; border-radius:6px; height:10px; overflow:hidden;">
+        <div id="multi-bar" style="background:#16a34a; height:100%; width:0%; transition:width 0.3s;"></div>
+      </div>
+      <div id="multi-status" style="font-size:0.78rem; color:#166534; margin-top:8px;"></div>
+      <div id="multi-errors" style="font-size:0.78rem; color:#c0392b; margin-top:4px;"></div>
+    </div>
+
     <div id="photo-preview" style="margin-top:14px; display:none;">
       <img id="preview-img" style="max-width:100%; max-height:300px; border-radius:10px; border:1px solid var(--border);">
     </div>
@@ -676,7 +693,7 @@
 
   <div class="actions">
     <button class="btn btn-secondary" onclick="resetForm()">Réinitialiser</button>
-    <button class="btn btn-primary" onclick="savePrescription()">Enregistrer la prescription</button>
+    <button class="btn btn-primary" id="save-btn" onclick="savePrescription()">Enregistrer la prescription</button>
   </div>
 </div>
 
@@ -690,6 +707,21 @@
       <span id="count-badge" class="badge">0 prescription(s)</span>
     </div>
   </div>
+
+  <!-- Stats + Recherche + Filtres -->
+  <div style="padding:12px 16px; border-bottom:1px solid var(--border); display:flex; flex-wrap:wrap; gap:10px; align-items:center;">
+    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+      <span id="stat-encours" style="font-size:0.75rem; background:#fff3cd; color:#856404; padding:3px 10px; border-radius:20px; font-weight:600;">0 en cours</span>
+      <span id="stat-livre" style="font-size:0.75rem; background:#d4edda; color:#155724; padding:3px 10px; border-radius:20px; font-weight:600;">0 livrés</span>
+    </div>
+    <input type="text" id="search-input" placeholder="🔍 Rechercher patient, praticien, numéro..." oninput="renderList()" style="flex:1; min-width:180px; border:1px solid var(--border); border-radius:8px; padding:6px 10px; font-size:0.82rem; font-family:'DM Sans',sans-serif;">
+    <select id="filter-statut" onchange="renderList()" style="border:1px solid var(--border); border-radius:8px; padding:6px 10px; font-size:0.82rem; font-family:'DM Sans',sans-serif; background:white;">
+      <option value="tous">Tous</option>
+      <option value="en-cours">En cours</option>
+      <option value="livre">Livrés</option>
+    </select>
+  </div>
+
   <div class="prescriptions-list" id="prescriptions-list">
     <div class="empty-state">Aucune prescription enregistrée pour le moment.</div>
   </div>
@@ -704,7 +736,135 @@
 function saveApiKey() {}
 
 
-// ---- SCAN PRESCRIPTION ----
+// ---- SCAN MULTIPLE ----
+async function scanMultiple(input) {
+  const files = [...input.files];
+  if (files.length === 0) return;
+
+  const total = files.length;
+  let errors = [];
+
+  document.getElementById('multi-progress').style.display = 'block';
+  document.getElementById('multi-total').textContent = total;
+  document.getElementById('multi-errors').textContent = '';
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    document.getElementById('multi-current').textContent = i + 1;
+    document.getElementById('multi-status').textContent = '⏳ Analyse de : ' + file.name;
+    document.getElementById('multi-bar').style.width = Math.round((i / total) * 100) + '%';
+
+    try {
+      const base64 = await fileToBase64(file);
+      const mediaType = file.type;
+      const data = await callGemini(base64, mediaType);
+      const prescription = buildPrescriptionFromScan(data);
+      prescriptions.unshift(prescription);
+      nextNum++;
+    } catch (err) {
+      errors.push(file.name + ' : ' + err.message);
+    }
+
+    // Pause de 500ms entre chaque pour éviter le rate limit
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  document.getElementById('multi-bar').style.width = '100%';
+  document.getElementById('multi-current').textContent = total;
+  document.getElementById('multi-status').textContent = '✅ ' + (total - errors.length) + ' fiche(s) importée(s) avec succès !';
+  if (errors.length > 0) {
+    document.getElementById('multi-errors').textContent = '❌ Erreurs : ' + errors.join(', ');
+  }
+
+  renderList();
+  showToast(total - errors.length + ' prescription(s) importées !');
+
+  // Reset input
+  input.value = '';
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => resolve(e.target.result.split(',')[1]);
+    reader.onerror = () => reject(new Error('Lecture impossible'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function callGemini(base64, mediaType) {
+  const response = await fetch('https://purple-rain-35e7.cohenillan29.workers.dev/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{
+        parts: [
+          { inline_data: { mime_type: mediaType, data: base64 } },
+          { text: `Analyse cette fiche de prescription dentaire et extrais toutes les informations visibles. Réponds UNIQUEMENT en JSON valide avec cette structure exacte :
+{
+  "numero_prescription": "",
+  "code_labo": "",
+  "praticien": "",
+  "patient_nom": "",
+  "patient_age": "",
+  "patient_sexe": "",
+  "date_empreinte": "",
+  "date_livraison": "",
+  "a_refaire": false,
+  "dents": [],
+  "conjointe": [],
+  "adjointe": [],
+  "machoire": "",
+  "fraisage": "",
+  "teinte": "",
+  "inter_bridge": "",
+  "commentaires": ""
+}
+Pour les dents, utilise la numérotation FDI (ex: [11, 21, 36]).
+Pour machoire: "haut", "bas" ou "".
+Pour les dates: attention au format français JJ/MM/AAAA — convertis en YYYY-MM-DD.
+Pour patient_sexe: "femme" ou "homme" en minuscules, seulement si clairement coché.
+Pour numero_prescription: numéro à 5 chiffres en haut à gauche.
+Pour code_labo: code court en haut à gauche dans la case CODE LABO.
+Pour conjointe, utilise UNIQUEMENT: "CCM", "CIV", "Couronne coulée", "EMAX", "Zirconium CCC", "Full zirconium", "Dent provisoire", "Implant scellé", "Implant transvisé", "Inlay Core céramiSé", "Inlay Core clavette", "Inlay Onlay composite", "Inlay Onlay céramique", "Inlay Onlay métal", "Facette composite", "Facette céramique", "Épaulement céram.", "Ailette métal", "Ceramic Rose Collet", "Unitaire", "Solidaire", "Armature", "Richmond", "Maquillage sillon oui", "Maquillage sillon non", "Point de contact fort", "Point de contact léger", "Occlusion sous occ", "Occlusion légère", "Occlusion forte", "Embrasure fermée", "Embrasure ouverte", "Limite sous gingival"
+Pour adjointe, utilise UNIQUEMENT: "PEI", "Stellite plaque nue", "Stellite montage stellite", "Stellite finition stellite", "Stellite sup. valplast", "Cire d'occlusion", "Ackers métal fini", "Ackers résine fini", "Ackers valplast fini", "Crochet valplast", "Contre plaque", "App résine montage", "App résine finition", "App résine grille de renfort", "Complet montage", "Complet finition", "Complet grille de renfort", "Valplast montage", "Valplast finition", "Valplast grille de renfort", "Réparation", "Rebasage", "Gouttière souple", "Gouttière dur résine", "Gouttière souple intra dur extra", "Blanchissement", "Dent à extraire", "Adjonction dent", "Adjonction crochet"
+Ne mets que ce qui est clairement visible et coché sur la fiche.` }
+        ]
+      }],
+      generationConfig: { temperature: 0.1 }
+    })
+  });
+
+  const data = await response.json();
+  if (data.error) throw new Error(data.error.message);
+  const text = data.candidates[0].content.parts[0].text;
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error('Réponse IA invalide');
+  return JSON.parse(jsonMatch[0]);
+}
+
+function buildPrescriptionFromScan(data) {
+  return {
+    numero: 'N° ' + (data.numero_prescription || nextNum),
+    code_labo: data.code_labo || '',
+    praticien: data.praticien || '',
+    patient: { nom: data.patient_nom || '', age: data.patient_age || '', sexe: data.patient_sexe || '' },
+    aRefaire: data.a_refaire || false,
+    dates: { empreinte: data.date_empreinte || '', livraison: data.date_livraison || '' },
+    dents: data.dents || [],
+    conjointe: data.conjointe || [],
+    fraisage: data.fraisage || '',
+    adjointe: data.adjointe || [],
+    machoire: data.machoire || '',
+    teinte: data.teinte || '',
+    interBridge: data.inter_bridge || '',
+    commentaires: data.commentaires || '',
+    statut: 'en-cours',
+    createdAt: new Date().toLocaleDateString('fr-FR'),
+  };
+}
+
+// ---- SCAN PRESCRIPTION (single) ----
 async function scanPrescription(input) {
   const file = input.files[0];
   if (!file) return;
@@ -1122,13 +1282,20 @@ function savePrescription() {
     teinte: document.getElementById('teinte-custom').value || selectedTeinte,
     interBridge: document.getElementById('inter-bridge').value,
     commentaires: document.getElementById('commentaires').value,
-    statut: 'en-cours',
-    createdAt: new Date().toLocaleDateString('fr-FR'),
+    statut: editingIndex >= 0 ? prescriptions[editingIndex].statut : 'en-cours',
+    createdAt: editingIndex >= 0 ? prescriptions[editingIndex].createdAt : new Date().toLocaleDateString('fr-FR'),
   };
 
-  prescriptions.unshift(prescription);
-  nextNum++;
-  showToast('Prescription enregistrée avec succès !');
+  if (editingIndex >= 0) {
+    prescriptions[editingIndex] = prescription;
+    showToast('Prescription mise à jour !');
+    editingIndex = -1;
+  } else {
+    prescriptions.unshift(prescription);
+    nextNum++;
+    showToast('Prescription enregistrée avec succès !');
+  }
+
   renderList();
   resetForm();
 }
@@ -1138,38 +1305,70 @@ function resetForm() {
   document.getElementById('prescription-form').reset();
   selectedDents.clear();
   selectedTeinte = '';
+  editingIndex = -1;
   document.querySelectorAll('.dent-btn').forEach(b => b.classList.remove('selected'));
   document.querySelectorAll('.teinte-chip').forEach(c => c.classList.remove('selected'));
   document.getElementById('num-display').value = '';
   document.getElementById('num-display').dataset.codeLabo = '';
+  const btn = document.getElementById('save-btn');
+  btn.textContent = 'Enregistrer la prescription';
+  btn.style.background = '';
 }
 
 // ---- RENDER LIST ----
+let editingIndex = -1;
+
 function renderList() {
   const list = document.getElementById('prescriptions-list');
   const badge = document.getElementById('count-badge');
+  const search = document.getElementById('search-input')?.value.toLowerCase() || '';
+  const filtre = document.getElementById('filter-statut')?.value || 'tous';
+
+  // Stats
+  const encours = prescriptions.filter(p => p.statut !== 'livre').length;
+  const livre = prescriptions.filter(p => p.statut === 'livre').length;
+  document.getElementById('stat-encours').textContent = encours + ' en cours';
+  document.getElementById('stat-livre').textContent = livre + ' livrés';
+
+  // Filtrage
+  let filtered = prescriptions.map((p, i) => ({ ...p, _index: i }));
+  if (filtre !== 'tous') filtered = filtered.filter(p => p.statut === filtre);
+  if (search) filtered = filtered.filter(p =>
+    (p.patient?.nom || '').toLowerCase().includes(search) ||
+    (p.praticien || '').toLowerCase().includes(search) ||
+    (p.numero || '').toLowerCase().includes(search) ||
+    (p.code_labo || '').toLowerCase().includes(search)
+  );
+
   badge.textContent = prescriptions.length + ' prescription(s)';
 
-  if (prescriptions.length === 0) {
-    list.innerHTML = '<div class="empty-state">Aucune prescription enregistrée pour le moment.</div>';
+  if (filtered.length === 0) {
+    list.innerHTML = '<div class="empty-state">' + (prescriptions.length === 0 ? 'Aucune prescription enregistrée pour le moment.' : 'Aucun résultat pour cette recherche.') + '</div>';
     return;
   }
 
-  list.innerHTML = prescriptions.map((p, i) => {
+  list.innerHTML = filtered.map(p => {
+    const i = p._index;
     const types = [...(p.conjointe||[]), ...(p.adjointe||[])].slice(0,2).join(', ') || '—';
     const statusClass = p.statut === 'livre' ? 'status-livre' : 'status-en-cours';
-    const statusLabel = p.statut === 'livre' ? 'Livré' : 'En cours';
+    const statusLabel = p.statut === 'livre' ? '✅ Livré' : '🔄 En cours';
+    const codeLabo = p.code_labo ? `<span style="font-size:0.72rem; background:var(--accent-light); color:var(--accent); padding:2px 8px; border-radius:10px; font-weight:600;">${p.code_labo}</span> ` : '';
     return `
       <div class="prescription-item" style="cursor:default;">
         <div class="pi-left">
-          <div class="pi-num">${p.numero}</div>
-          <div class="pi-patient">${p.patient?.nom || '—'} ${p.patient?.age ? '(' + p.patient.age + ' ans)' : ''}</div>
+          <div class="pi-num">${codeLabo}${p.numero}</div>
+          <div class="pi-patient">${p.patient?.nom || '—'} ${p.patient?.age ? '(' + p.patient.age + ' ans)' : ''} ${p.patient?.sexe ? '· ' + p.patient.sexe : ''}</div>
           <div class="pi-type">Dr. ${p.praticien || '—'} · ${types}</div>
+          <div style="font-size:0.72rem; color:var(--muted); margin-top:2px;">Créé le ${p.createdAt || '—'}</div>
         </div>
         <div class="pi-actions">
-          <div style="display:flex;gap:8px;align-items:center;">
+          <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
             <span class="status-badge ${statusClass}" style="cursor:pointer;" onclick="toggleStatut(${i})">${statusLabel}</span>
-            <button class="btn-pdf" onclick="exportPDF(${i})">📄 Exporter PDF</button>
+          </div>
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
+            <button class="btn-pdf" onclick="editPrescription(${i})" style="background:#e8f2f9;color:var(--accent);">✏️ Modifier</button>
+            <button class="btn-pdf" onclick="exportPDF(${i})">📄 PDF</button>
+            <button class="btn-pdf" onclick="deletePrescription(${i})" style="color:var(--danger);border-color:var(--danger);">🗑️</button>
           </div>
           <div class="pi-date">Livraison : ${p.dates?.livraison ? new Date(p.dates.livraison).toLocaleDateString('fr-FR') : '—'}</div>
         </div>
@@ -1182,6 +1381,77 @@ function toggleStatut(i) {
   prescriptions[i].statut = prescriptions[i].statut === 'livre' ? 'en-cours' : 'livre';
   renderList();
 }
+
+function deletePrescription(i) {
+  if (!confirm('Supprimer cette prescription ?')) return;
+  prescriptions.splice(i, 1);
+  renderList();
+  showToast('Prescription supprimée');
+}
+
+function editPrescription(i) {
+  const p = prescriptions[i];
+  editingIndex = i;
+
+  // Remplir le formulaire
+  document.getElementById('praticien').value = p.praticien || '';
+  document.getElementById('patient-nom').value = p.patient?.nom || '';
+  document.getElementById('patient-age').value = p.patient?.age || '';
+  document.getElementById('a-refaire').checked = p.aRefaire || false;
+  document.getElementById('date-empreinte').value = p.dates?.empreinte || '';
+  document.getElementById('date-livraison').value = p.dates?.livraison || '';
+  document.getElementById('fraisage').value = p.fraisage || '';
+  document.getElementById('teinte-custom').value = p.teinte || '';
+  document.getElementById('inter-bridge').value = p.interBridge || '';
+  document.getElementById('commentaires').value = p.commentaires || '';
+  document.getElementById('num-display').value = p.numero.replace('N° ', '');
+  document.getElementById('num-display').dataset.codeLabo = p.code_labo || '';
+
+  // Sexe
+  if (p.patient?.sexe) {
+    const radio = document.querySelector(`input[name="sexe"][value="${p.patient.sexe}"]`);
+    if (radio) radio.checked = true;
+  }
+
+  // Mâchoire
+  if (p.machoire) {
+    const radio = document.querySelector(`input[name="mach"][value="${p.machoire}"]`);
+    if (radio) radio.checked = true;
+  }
+
+  // Dents
+  selectedDents.clear();
+  document.querySelectorAll('.dent-btn').forEach(b => b.classList.remove('selected'));
+  (p.dents || []).forEach(n => {
+    selectedDents.add(Number(n));
+    const btn = document.querySelector(`.dent-btn[data-dent="${n}"]`);
+    if (btn) btn.classList.add('selected');
+  });
+
+  // Cases conjointe
+  document.querySelectorAll('input[name="conjointe"]').forEach(cb => {
+    cb.checked = (p.conjointe || []).includes(cb.value);
+  });
+
+  // Cases adjointe
+  document.querySelectorAll('input[name="adjointe"]').forEach(cb => {
+    cb.checked = (p.adjointe || []).includes(cb.value);
+  });
+
+  // Teinte
+  document.querySelectorAll('.teinte-chip').forEach(c => {
+    c.classList.toggle('selected', c.textContent === p.teinte);
+  });
+
+  // Changer le bouton
+  document.getElementById('save-btn').textContent = '💾 Mettre à jour';
+  document.getElementById('save-btn').style.background = '#f59e0b';
+
+  // Scroll vers le formulaire
+  document.querySelector('.card').scrollIntoView({ behavior: 'smooth' });
+  showToast('Prescription chargée — modifie et sauvegarde !');
+}
+
 
 // ---- TOAST ----
 function showToast(msg, isError = false) {
