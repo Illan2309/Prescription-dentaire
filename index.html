@@ -441,9 +441,8 @@
       ⏳ Analyse de la fiche en cours... merci de patienter
     </div>
     <div id="correction-zone" style="display:none; margin-top:16px; background:#fff8e1; border:1px solid #ffe082; border-radius:10px; padding:14px;">
-      <div style="font-size:0.85rem; font-weight:600; color:#856404; margin-bottom:8px;">✏️ L'IA a rempli le formulaire — corrige les erreurs si besoin puis clique ici :</div>
-      <button class="btn" style="background:#f59e0b; color:white;" onclick="envoyerCorrection()">📤 Enregistrer avec corrections</button>
-      <button class="btn btn-secondary" style="margin-left:8px;" onclick="ignorerCorrection()">Ignorer</button>
+      <div style="font-size:0.85rem; font-weight:600; color:#856404; margin-bottom:8px;">✏️ Formulaire rempli — vérifie et corrige si besoin, puis clique <strong>"Enregistrer la prescription"</strong> en bas de page.</div>
+      <button class="btn btn-secondary" style="font-size:0.8rem;" onclick="ignorerCorrection()">✕ Fermer ce message</button>
       <div id="correction-status" style="font-size:0.78rem; color:var(--muted); margin-top:8px;"></div>
     </div>
   </div>
@@ -1311,6 +1310,12 @@ function savePrescription() {
   } else {
     prescriptions.unshift(prescription);
     nextNum++;
+    // Sauvegarder automatiquement la correction si scan IA
+    if (lastScanIA) {
+      const corrections = JSON.parse(localStorage.getItem('corrections') || '[]');
+      corrections.push({ date: new Date().toLocaleDateString('fr-FR'), ia: lastScanIA, correction: prescription });
+      localStorage.setItem('corrections', JSON.stringify(corrections));
+    }
     showToast('Prescription enregistrée avec succès !');
   }
 
